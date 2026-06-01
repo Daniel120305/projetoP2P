@@ -6,51 +6,58 @@ import uuid
 import queue
 from datetime import datetime
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuração
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 01: Infraestrutura TCP (Workers)
+# ═══════════════════════════════════════════════════════════════════════════════
 MASTER_ID   = "Master_A"
 WORKER_HOST = "10.62.206.13"
-WORKER_PORT = 10000          # Workers conectam aqui (Sprint 1 e 2)
-MASTER_HOST = "10.62.206.13"
-MASTER_PORT = 10001          # Masters vizinhos conectam aqui (Sprint 3)
+WORKER_PORT = 10000          # Workers conectam aqui
 
-# Thresholds com histerese (Sprint 3 T02)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 01: Servidor TCP entre Masters (M2M)
+# ═══════════════════════════════════════════════════════════════════════════════
+MASTER_HOST = "10.62.206.13"
+MASTER_PORT = 10001          # Masters vizinhos conectam aqui
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 02: Thresholds com Histerese
+# ═══════════════════════════════════════════════════════════════════════════════
 CAPACITY             = 10   # capacidade nominal da fila
 SATURATION_THRESHOLD = 10   # load > este → solicitar ajuda
 RELEASE_THRESHOLD    = 4    # load < este → devolver workers
 
-# Diretório de Masters vizinhos: {"Master_B": {"host": "...", "master_port": 5011, "worker_port": 5010}}
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 01: Diretório de Masters Vizinhos
+# ═══════════════════════════════════════════════════════════════════════════════
 NEIGHBOR_MASTERS: dict = {
-    # Exemplo:
-    # "Master_B": {"host": "127.0.0.1", "master_port": 5011, "worker_port": 5010}
+    # "Master_B": {"host": "10.x.x.x", "master_port": 10011, "worker_port": 10010}
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado compartilhado
 # ─────────────────────────────────────────────────────────────────────────────
-task_queue  = queue.Queue()   # fila de tarefas pendentes (thread-safe)
-state_lock  = threading.Lock()
+task_queue  = queue.Queue()    # Sprint 2 T02 — fila de tarefas (thread-safe)
+state_lock  = threading.Lock() # Sprint 3 T06 — protege dicionários compartilhados
 
 # workers: {worker_uuid: {"conn", "addr", "is_borrowed", "original_master", "send_lock"}}
 workers: dict = {}
 
 # pending_m2m: {request_id: {"event": Event, "response": dict|None}}
-pending_m2m: dict = {}
+pending_m2m: dict = {}         # Sprint 3 T03 — correlação de respostas M2M
 
-# conexões M2M abertas: {master_id: (conn, send_lock)} — reutilizadas p/ notify_worker_returned
-m2m_conns: dict = {}
+# conexões M2M abertas: {master_id: (conn, send_lock)}
+m2m_conns: dict = {}           # Sprint 3 T05 — reutilizadas para notify_worker_returned
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Utilitários
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 07: Logs e Observabilidade
+# ═══════════════════════════════════════════════════════════════════════════════
 def log(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [MASTER {MASTER_ID}] {msg}", flush=True)
 
 
 def safe_send(conn: socket.socket, send_lock: threading.Lock, data: dict) -> bool:
-    """Envia JSON + '\\n' de forma thread-safe."""
+    """Sprint 3 T06 — envia JSON + '\\n' de forma thread-safe (send_lock)."""
     with send_lock:
         try:
             conn.send((json.dumps(data) + "\n").encode("utf-8"))
@@ -61,7 +68,7 @@ def safe_send(conn: socket.socket, send_lock: threading.Lock, data: dict) -> boo
 
 
 def iter_messages(conn: socket.socket):
-    """Generator: lê linhas JSON de uma conexão persistente."""
+    """Sprint 1 T01 — lê linhas JSON delimitadas por '\\n' de uma conexão persistente."""
     buffer = ""
     while True:
         try:
@@ -84,45 +91,43 @@ def iter_messages(conn: socket.socket):
 
 
 def worker_count() -> str:
-    """Retorna resumo de workers locais vs emprestados."""
+    """Sprint 3 T07 — contador de workers locais vs emprestados."""
     with state_lock:
         local    = sum(1 for w in workers.values() if not w["is_borrowed"])
         borrowed = sum(1 for w in workers.values() if w["is_borrowed"])
     return f"locais={local} emprestados={borrowed} total={local+borrowed}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sprint 1 + 2 + 3-registro: handler de Workers
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 03: Responder HEARTBEAT com ALIVE
+# Sprint 2 — Tarefa 01: Apresentação e Identificação (ALIVE + WORKER_UUID)
+# Sprint 2 — Tarefa 02: Distribuição de Carga (QUERY / NO_TASK)
+# Sprint 2 — Tarefa 03: Receber STATUS do Worker
+# Sprint 2 — Tarefa 04: Enviar ACK e Persistência
+# Sprint 3 — Tarefa 04: Registrar Worker temporário (register_temporary_worker)
+# ═══════════════════════════════════════════════════════════════════════════════
 def handle_worker(conn: socket.socket, addr: tuple) -> None:
-    """
-    Trata uma conexão de Worker.
-    Cobre Sprint 1 (HEARTBEAT), Sprint 2 (ALIVE/QUERY/STATUS/ACK)
-    e Sprint 3 (register_temporary_worker).
-    """
     log(f"[W] Nova conexão: {addr}")
-    send_lock   = threading.Lock()
+    send_lock   = threading.Lock()   # Sprint 3 T06 — lock por conexão
     worker_uuid = None
     is_borrowed = False
 
     for msg in iter_messages(conn):
-        task    = msg.get("TASK", "")
-        worker  = msg.get("WORKER", "")
-        status  = msg.get("STATUS", "")
-        mtype   = msg.get("type", "")
+        task   = msg.get("TASK", "")
+        worker = msg.get("WORKER", "")
+        status = msg.get("STATUS", "")
+        mtype  = msg.get("type", "")
 
-        # ── Sprint 1: Heartbeat ───────────────────────────────────────────────
+        # ── Sprint 1 T03: Responder HEARTBEAT com ALIVE ───────────────────────
         if task == "HEARTBEAT":
-            # Campo obrigatório: SERVER_UUID (qual master o worker está verificando)
-            resp = {
+            safe_send(conn, send_lock, {
                 "SERVER_UUID": MASTER_ID,
                 "TASK":        "HEARTBEAT",
-                "RESPONSE":    "ALIVE"
-            }
-            safe_send(conn, send_lock, resp)
+                "RESPONSE":    "ALIVE",
+            })
             log(f"[W] HEARTBEAT respondido → {addr}")
 
-        # ── Sprint 3: Worker temporário se registra ───────────────────────────
+        # ── Sprint 3 T04: Worker temporário se registra ───────────────────────
         elif mtype == "register_temporary_worker":
             p = msg.get("payload", {})
             if not p.get("worker_id") or not p.get("original_master_address"):
@@ -142,7 +147,7 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
             log(f"[W] Worker emprestado registrado: {worker_uuid} | origem: {original}")
             log(f"[W] Farm → {worker_count()}")
 
-        # ── Sprint 2 T01: Apresentação / Pedido de tarefa ─────────────────────
+        # ── Sprint 2 T01: Apresentação ALIVE + identificação ─────────────────
         elif worker == "ALIVE":
             worker_uuid = msg.get("WORKER_UUID")
             server_uuid = msg.get("SERVER_UUID")   # presente somente se emprestado
@@ -151,7 +156,7 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
                 log(f"[W] ALIVE sem WORKER_UUID ignorado: {msg}")
                 continue
 
-            if server_uuid:                         # worker emprestado
+            if server_uuid:
                 is_borrowed = True
                 with state_lock:
                     workers[worker_uuid] = {
@@ -162,7 +167,7 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
                         "send_lock":       send_lock,
                     }
                 log(f"[W] Worker emprestado {worker_uuid} (de {server_uuid}) solicita tarefa")
-            else:                                   # worker local
+            else:
                 is_borrowed = False
                 with state_lock:
                     workers[worker_uuid] = {
@@ -176,11 +181,10 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
 
             log(f"[W] Farm → {worker_count()}")
 
-            # Sprint 2 T02: entregar tarefa ou informar fila vazia
+            # ── Sprint 2 T02: Entregar tarefa ou informar fila vazia ──────────
             try:
                 task_data = task_queue.get_nowait()
-                resp = {"TASK": "QUERY", "USER": task_data["user"]}
-                safe_send(conn, send_lock, resp)
+                safe_send(conn, send_lock, {"TASK": "QUERY", "USER": task_data["user"]})
                 log(f"[W] QUERY entregue → {worker_uuid} "
                     f"({'emprestado' if is_borrowed else 'local'}) "
                     f"| fila restante: {task_queue.qsize()}")
@@ -188,7 +192,7 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
                 safe_send(conn, send_lock, {"TASK": "NO_TASK"})
                 log(f"[W] NO_TASK → {worker_uuid} (fila vazia)")
 
-        # ── Sprint 2 T03/04: Reporte de status e ACK ─────────────────────────
+        # ── Sprint 2 T03/04: Receber STATUS e enviar ACK ──────────────────────
         elif status in ("OK", "NOK") and task == "QUERY":
             w_uuid = msg.get("WORKER_UUID", worker_uuid)
             kind   = "emprestado" if is_borrowed else "local"
@@ -196,11 +200,11 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
             safe_send(conn, send_lock, {"STATUS": "ACK", "WORKER_UUID": w_uuid})
             log(f"[W] ACK enviado → {w_uuid}")
 
-        # ── Mensagem desconhecida: ignorar com log (compatibilidade futura) ───
+        # ── Sprint 3 T06: Mensagem desconhecida — log + ignorar ───────────────
         else:
             log(f"[W] Mensagem desconhecida de {addr} (ignorada): {msg}")
 
-    # ── Cleanup ao desconectar ────────────────────────────────────────────────
+    # Cleanup ao desconectar
     if worker_uuid:
         with state_lock:
             workers.pop(worker_uuid, None)
@@ -212,16 +216,15 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
         pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sprint 3: handler de Masters vizinhos (servidor M2M)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 03: Protocolo de Negociação (lado receptor)
+# Sprint 3 — Tarefa 04: Enviar command_redirect aos Workers selecionados
+# Sprint 3 — Tarefa 05: Receber notify_worker_returned
+# Sprint 3 — Tarefa 06: Tipo desconhecido — log + ignorar
+# ═══════════════════════════════════════════════════════════════════════════════
 def handle_master(conn: socket.socket, addr: tuple) -> None:
-    """
-    Trata uma conexão Master-to-Master.
-    Sprint 3 T01 (infra) + T03 (negociação) + T04 (redirect) + T05 (devolução).
-    """
     log(f"[M2M] Master conectado: {addr}")
-    send_lock = threading.Lock()
+    send_lock = threading.Lock()   # Sprint 3 T06 — lock por conexão
 
     for msg in iter_messages(conn):
         mtype      = msg.get("type", "")
@@ -229,17 +232,18 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
         p          = msg.get("payload", {})
         rid_short  = request_id[:8] if request_id else "?"
 
+        # Sprint 3 T07 — loga todo recebimento M2M com type e request_id
         log(f"[M2M] ← type={mtype} request_id={rid_short}")
 
-        # ── Sprint 3 T03: Receber pedido de ajuda ────────────────────────────
+        # ── Sprint 3 T03: Receber request_help → avaliar e responder ──────────
         if mtype == "request_help":
             if not p.get("master_id"):
                 log(f"[M2M] request_help sem master_id (ignorado)")
                 continue
 
-            master_id       = p["master_id"]
-            workers_needed  = p.get("workers_needed", 1)
-            master_waddr    = p.get("worker_address", "")   # endereço worker-port do Master A
+            master_id      = p["master_id"]
+            workers_needed = p.get("workers_needed", 1)
+            master_waddr   = p.get("worker_address", "")
 
             with state_lock:
                 available = [uid for uid, w in workers.items() if not w["is_borrowed"]]
@@ -251,45 +255,40 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
                     with state_lock:
                         w = workers.get(uid)
                     if w:
-                        details.append({
-                            "id":      uid,
-                            "address": f"{w['addr'][0]}:{w['addr'][1]}"
-                        })
+                        details.append({"id": uid, "address": f"{w['addr'][0]}:{w['addr'][1]}"})
 
-                resp = {
+                # response_accepted com mesmo request_id (Sprint 3 T03)
+                safe_send(conn, send_lock, {
                     "type":       "response_accepted",
-                    "request_id": request_id,       # mesmo request_id da requisição
+                    "request_id": request_id,
                     "payload": {
                         "workers_offered": len(chosen),
                         "worker_details":  details,
                     },
-                }
-                safe_send(conn, send_lock, resp)
+                })
                 log(f"[M2M] → response_accepted | {len(chosen)} worker(s) → {master_id}")
 
-                # Sprint 3 T04: enviar command_redirect a cada worker selecionado
+                # ── Sprint 3 T04: Enviar command_redirect a cada worker ────────
                 for uid in chosen:
                     with state_lock:
                         w = workers.get(uid)
                     if w:
-                        cmd = {
+                        if safe_send(w["conn"], w["send_lock"], {
                             "type":       "command_redirect",
                             "request_id": str(uuid.uuid4()),
                             "payload":    {"new_master_address": master_waddr},
-                        }
-                        if safe_send(w["conn"], w["send_lock"], cmd):
+                        }):
                             log(f"[M2M] → command_redirect → worker {uid} | destino: {master_waddr}")
             else:
                 reason = "no_workers_available" if not available else "high_load"
-                resp = {
+                safe_send(conn, send_lock, {
                     "type":       "response_rejected",
                     "request_id": request_id,
                     "payload":    {"reason": reason},
-                }
-                safe_send(conn, send_lock, resp)
+                })
                 log(f"[M2M] → response_rejected → {master_id} | reason={reason}")
 
-        # ── Respostas ao nosso request_help (chegam aqui via conexão de saída) ─
+        # ── Sprint 3 T03: Correlacionar resposta ao nosso request_help ────────
         elif mtype in ("response_accepted", "response_rejected"):
             with state_lock:
                 entry = pending_m2m.get(request_id)
@@ -300,12 +299,12 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
             else:
                 log(f"[M2M] Resposta sem request_id correspondente: {rid_short}")
 
-        # ── Sprint 3 T05: Worker devolvido ────────────────────────────────────
+        # ── Sprint 3 T05: Confirmar devolução do worker ───────────────────────
         elif mtype == "notify_worker_returned":
             worker_id = p.get("worker_id", "?")
             log(f"[M2M] Worker {worker_id} devolvido. Farm atualizada.")
 
-        # ── Tipo desconhecido ─────────────────────────────────────────────────
+        # ── Sprint 3 T06: Tipo desconhecido — log + ignorar ──────────────────
         else:
             log(f"[M2M] type desconhecido '{mtype}' (ignorado)")
 
@@ -316,25 +315,22 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
         pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sprint 3 T03: solicitar ajuda a um Master vizinho (conexão de saída)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 03: Solicitar ajuda a Master vizinho (conexão de saída)
+# ═══════════════════════════════════════════════════════════════════════════════
 def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int) -> None:
-    """Abre conexão com Master vizinho e realiza protocolo de negociação."""
     try:
-        h   = neighbor_info["host"]
-        mp  = neighbor_info["master_port"]
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.settimeout(6)
-        conn.connect((h, mp))
+        conn.connect((neighbor_info["host"], neighbor_info["master_port"]))
         send_lock = threading.Lock()
 
-        req_id = str(uuid.uuid4())
+        req_id = str(uuid.uuid4())   # UUID v4 como request_id
         event  = threading.Event()
         with state_lock:
             pending_m2m[req_id] = {"event": event, "response": None}
 
-        msg = {
+        safe_send(conn, send_lock, {
             "type":       "request_help",
             "request_id": req_id,
             "payload": {
@@ -344,11 +340,10 @@ def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int
                 "workers_needed": workers_needed,
                 "worker_address": f"{WORKER_HOST}:{WORKER_PORT}",
             },
-        }
-        safe_send(conn, send_lock, msg)
+        })
         log(f"[SAT] → request_help → {neighbor_id} | req={req_id[:8]} workers_needed={workers_needed}")
 
-        # Ler respostas em thread separada para não bloquear o saturation_monitor
+        # Lê resposta em thread separada para não bloquear saturation_monitor
         def _read():
             for resp_msg in iter_messages(conn):
                 r = resp_msg.get("request_id", "")
@@ -357,10 +352,9 @@ def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int
                         pending_m2m[r]["response"] = resp_msg
                         pending_m2m[r]["event"].set()
 
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
+        threading.Thread(target=_read, daemon=True).start()
 
-        # Aguardar resposta até 5 segundos (Sprint 3 T03)
+        # Sprint 3 T03 — timeout de 5s para a resposta
         if not event.wait(timeout=5):
             log(f"[SAT] Timeout aguardando {neighbor_id} (req={req_id[:8]})")
             with state_lock:
@@ -376,13 +370,11 @@ def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int
             conn.close()
             return
 
-        rtype = response.get("type", "")
-        if rtype == "response_accepted":
+        if response.get("type") == "response_accepted":
             offered = response.get("payload", {}).get("workers_offered", 0)
             log(f"[SAT] ✅ {neighbor_id} aceitou! {offered} worker(s) a caminho.")
-            # Manter conexão aberta para notify_worker_returned posterior
             with state_lock:
-                m2m_conns[neighbor_id] = (conn, send_lock)
+                m2m_conns[neighbor_id] = (conn, send_lock)  # mantém para notify_worker_returned
         else:
             reason = response.get("payload", {}).get("reason", "?")
             log(f"[SAT] ❌ {neighbor_id} recusou: reason={reason}")
@@ -392,20 +384,16 @@ def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int
         log(f"[SAT] Erro ao contatar {neighbor_id}: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sprint 3 T02: monitor de saturação e liberação
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 02: Detecção de Saturação e Liberação (histerese)
+# Sprint 3 — Tarefa 05: Devolver Workers (command_release + notify_worker_returned)
+# ═══════════════════════════════════════════════════════════════════════════════
 def saturation_monitor() -> None:
-    """
-    Roda a cada 5s.
-    - Se load > SATURATION_THRESHOLD → solicitar ajuda aos vizinhos.
-    - Se load < RELEASE_THRESHOLD e há workers emprestados → devolvê-los.
-    """
     while True:
         time.sleep(5)
         load = task_queue.qsize()
 
-        # ── Verificar se deve devolver workers ───────────────────────────────
+        # ── Sprint 3 T05: Verificar devolução (RELEASE_THRESHOLD — histerese) ─
         with state_lock:
             borrowed_uuids = [uid for uid, w in workers.items() if w["is_borrowed"]]
 
@@ -418,22 +406,20 @@ def saturation_monitor() -> None:
                     continue
                 orig = w.get("original_master", "")
 
-                # Sprint 3 T05: command_release ao worker
-                cmd_release = {
+                # command_release ao worker emprestado
+                if safe_send(w["conn"], w["send_lock"], {
                     "type":       "command_release",
                     "request_id": str(uuid.uuid4()),
                     "payload":    {"original_master_address": orig},
-                }
-                if safe_send(w["conn"], w["send_lock"], cmd_release):
+                }):
                     log(f"[SAT] → command_release → worker {uid}")
 
-                # Remover worker emprestado da farm imediatamente
+                # Remover worker emprestado da farm
                 with state_lock:
                     workers.pop(uid, None)
                 log(f"[SAT] Worker {uid} removido da farm | Farm → {worker_count()}")
 
-                # Sprint 3 T05: notify_worker_returned ao Master de origem
-                # Cruzar endereço original com NEIGHBOR_MASTERS para achar o master_id correto
+                # notify_worker_returned ao Master de origem
                 orig_master_id = None
                 for mid, info in NEIGHBOR_MASTERS.items():
                     if orig == f"{info['host']}:{info['worker_port']}":
@@ -447,16 +433,15 @@ def saturation_monitor() -> None:
                         m2m_entry = m2m_conns.get(orig_master_id)
                     if m2m_entry:
                         m2m_conn, m2m_lock = m2m_entry
-                        notif = {
+                        if safe_send(m2m_conn, m2m_lock, {
                             "type":       "notify_worker_returned",
                             "request_id": str(uuid.uuid4()),
                             "payload":    {"worker_id": uid},
-                        }
-                        if safe_send(m2m_conn, m2m_lock, notif):
+                        }):
                             log(f"[SAT] → notify_worker_returned → {orig_master_id} worker={uid}")
-            continue  # o loop continuará na próxima iteração do while True
+            continue
 
-        # ── Verificar saturação ───────────────────────────────────────────────
+        # ── Sprint 3 T02: Verificar saturação (SATURATION_THRESHOLD) ──────────
         if load > SATURATION_THRESHOLD:
             workers_needed = max(1, (load - CAPACITY) // 3)
             log(f"[SAT] ⚠️  Saturação detectada! load={load} | pedindo {workers_needed} worker(s)")
@@ -464,15 +449,14 @@ def saturation_monitor() -> None:
                 threading.Thread(
                     target=request_help_from,
                     args=(nid, ninfo, workers_needed),
-                    daemon=True
+                    daemon=True,
                 ).start()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Simulação de carga (Sprint 2 T02)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 2 — Tarefa 02: Simulação de Carga (populate task_queue)
+# ═══════════════════════════════════════════════════════════════════════════════
 def simulate_load() -> None:
-    """Adiciona tarefas à fila periodicamente para simular chegada de requisições."""
     users = ["Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry"]
     i = 0
     while True:
@@ -482,11 +466,11 @@ def simulate_load() -> None:
         i += 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Servidores TCP
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 01: Servidor TCP para Workers
+# Sprint 1 — Tarefa 04: 1 thread por Worker (concorrência)
+# ═══════════════════════════════════════════════════════════════════════════════
 def start_worker_server() -> None:
-    """Sprint 1 T01: Servidor para conexões de Workers."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((WORKER_HOST, WORKER_PORT))
@@ -497,8 +481,11 @@ def start_worker_server() -> None:
         threading.Thread(target=handle_worker, args=(conn, addr), daemon=True).start()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 3 — Tarefa 01: Servidor TCP para Masters vizinhos
+# Sprint 3 — Tarefa 01: 1 thread por Master vizinho (concorrência)
+# ═══════════════════════════════════════════════════════════════════════════════
 def start_master_server() -> None:
-    """Sprint 3 T01: Servidor para conexões Master-to-Master."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((MASTER_HOST, MASTER_PORT))
@@ -509,9 +496,14 @@ def start_master_server() -> None:
         threading.Thread(target=handle_master, args=(conn, addr), daemon=True).start()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Entry Point — Arquitetura de threads (SPEC §4)
+#
+#   main thread  →  start_worker_server()   (bloqueia — Sprint 1 T01)
+#   daemon       →  start_master_server()   (Sprint 3 T01)
+#   daemon       →  simulate_load()         (Sprint 2 T02)
+#   daemon       →  saturation_monitor()    (Sprint 3 T02)
+# ═══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log(f"Iniciando Master {MASTER_ID}")
     log(f"  Worker port : {WORKER_PORT}")
@@ -522,4 +514,4 @@ if __name__ == "__main__":
     threading.Thread(target=simulate_load,       daemon=True).start()
     threading.Thread(target=saturation_monitor,  daemon=True).start()
     threading.Thread(target=start_master_server, daemon=True).start()
-    start_worker_server()   # bloqueia o processo principal
+    start_worker_server()

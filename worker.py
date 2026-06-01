@@ -7,66 +7,62 @@ import threading
 import queue
 from datetime import datetime
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuração
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 01: Configuração da Conexão TCP
+# Sprint 1 — Tarefa 02: Intervalo do Heartbeat
+# Sprint 2 — Tarefa 01: WORKER_UUID único
+# ═══════════════════════════════════════════════════════════════════════════════
 MASTER_HOST        = "10.62.206.13"
 MASTER_PORT        = 10000
-HEARTBEAT_INTERVAL = 30          # segundos entre heartbeats (Sprint 1)
-WORKER_UUID        = str(uuid.uuid4())
+HEARTBEAT_INTERVAL = 30                 # Sprint 1 T02 — heartbeat a cada 30s
+WORKER_UUID        = str(uuid.uuid4())  # Sprint 2 T01 — UUID único por instância
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Utilitário de log
-# ─────────────────────────────────────────────────────────────────────────────
 def log(msg: str) -> None:
     ts    = datetime.now().strftime("%H:%M:%S")
     short = WORKER_UUID[:8]
     print(f"[{ts}] [WORKER {short}] {msg}", flush=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Classe WorkerClient
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 04: Concorrência e Resiliência (WorkerClient)
+# Sprint 2 — Tarefa 01 a 04: Ciclo de Tarefas completo
+# Sprint 3 — Tarefa 04: Redirecionamento (command_redirect / register_temporary)
+# Sprint 3 — Tarefa 05: Devolução (command_release)
+# Sprint 3 — Tarefa 06: send_lock por conexão, filas response_q / command_q
+# ═══════════════════════════════════════════════════════════════════════════════
 class WorkerClient:
-    """
-    Encapsula toda a lógica do Worker:
-    - Sprint 1: heartbeat periódico via TCP
-    - Sprint 2: ciclo ALIVE → QUERY/NO_TASK → STATUS → ACK
-    - Sprint 3: command_redirect / command_release / register_temporary_worker
-    """
 
     def __init__(
         self,
-        host:          str,
-        port:          int,
-        master_id:     str,
-        is_borrowed:   bool = False,
+        host:           str,
+        port:           int,
+        master_id:      str,
+        is_borrowed:    bool = False,
         orig_master_id: str  = None,
-        orig_host:     str  = None,
-        orig_port:     int  = None,
+        orig_host:      str  = None,
+        orig_port:      int  = None,
     ):
         self.host          = host
         self.port          = port
         self.master_id     = master_id
         self.is_borrowed   = is_borrowed
 
-        # Endereço e ID do Master original (para devolução — Sprint 3)
+        # Sprint 3 T05 — endereço do Master original para devolução
         self.orig_master_id = orig_master_id or master_id
         self.orig_host      = orig_host or host
         self.orig_port      = orig_port or port
 
         self.conn:      socket.socket | None = None
-        self.send_lock: threading.Lock = threading.Lock()
+        self.send_lock: threading.Lock = threading.Lock()  # Sprint 3 T06
         self.active:    bool           = False
 
-        # Filas internas de mensagens (usadas pela thread leitora)
-        self.response_q: queue.Queue = queue.Queue()   # respostas esperadas (HEARTBEAT, QUERY, ACK…)
-        self.command_q:  queue.Queue = queue.Queue()   # comandos não solicitados (redirect, release)
+        # Sprint 3 T06 — filas internas: separam respostas de comandos não solicitados
+        self.response_q: queue.Queue = queue.Queue()  # QUERY, NO_TASK, ACK…
+        self.command_q:  queue.Queue = queue.Queue()  # command_redirect, command_release
 
-    # ── Conexão ───────────────────────────────────────────────────────────────
+    # ── Sprint 1 T04: Reconexão automática com loop + sleep(5) ───────────────
     def _connect(self) -> None:
-        """Conecta ao Master, tentando indefinidamente até conseguir."""
         while True:
             try:
                 self.conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -78,7 +74,7 @@ class WorkerClient:
                 log(f"Falha ao conectar: {e}. Tentando novamente em 5s…")
                 time.sleep(5)
 
-    # ── Envio seguro ──────────────────────────────────────────────────────────
+    # ── Sprint 3 T06: Envio thread-safe (send_lock por conexão) ──────────────
     def _send(self, data: dict) -> bool:
         with self.send_lock:
             try:
@@ -89,14 +85,8 @@ class WorkerClient:
                 self.active = False
                 return False
 
-    # ── Thread leitora ────────────────────────────────────────────────────────
+    # ── Sprint 1 T04: Thread leitora — roteia mensagens para as filas certas ──
     def _reader_thread(self) -> None:
-        """
-        Lê continuamente da socket e distribui mensagens:
-        - command_redirect / command_release  → command_q (não solicitados)
-        - HEARTBEAT ALIVE                     → tratado aqui (log imediato)
-        - todo o resto                        → response_q (resposta esperada)
-        """
         buffer = ""
         while self.active:
             try:
@@ -116,15 +106,15 @@ class WorkerClient:
                         msg   = json.loads(line)
                         mtype = msg.get("type", "")
 
-                        # Comandos não solicitados (Sprint 3)
+                        # Sprint 3 T04/05 — comandos não solicitados → command_q
                         if mtype in ("command_redirect", "command_release"):
                             self.command_q.put(msg)
 
-                        # Resposta de HEARTBEAT: tratar inline sem mexer na response_q
+                        # Sprint 1 T03 — resposta HEARTBEAT: tratar inline
                         elif msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
                             log("Status: ALIVE")
 
-                        # Tudo o mais: colocar na fila para quem está esperando
+                        # Sprint 2 — respostas esperadas pelo ciclo de tarefa
                         else:
                             self.response_q.put(msg)
 
@@ -138,67 +128,56 @@ class WorkerClient:
                 self.active = False
                 break
 
-        # Desbloqueia qualquer thread aguardando resposta
-        self.response_q.put(None)
+        self.response_q.put(None)  # desbloqueia threads aguardando resposta
 
-    # ── Sprint 1: Heartbeat periódico ─────────────────────────────────────────
+    # ── Sprint 1 T02: Heartbeat periódico em thread separada (30s) ───────────
     def _heartbeat_loop(self) -> None:
-        """Envia HEARTBEAT a cada HEARTBEAT_INTERVAL segundos."""
         while self.active:
             time.sleep(HEARTBEAT_INTERVAL)
             if not self.active:
                 break
-            payload = {
-                "SERVER_UUID": self.master_id,
-                "TASK":        "HEARTBEAT",
-            }
-            if self._send(payload):
+            # Sprint 1 T02 — payload exato: SERVER_UUID + TASK
+            if self._send({"SERVER_UUID": self.master_id, "TASK": "HEARTBEAT"}):
                 log(f"Heartbeat enviado para {self.master_id}")
             else:
+                # Sprint 1 T03 — log de falha
                 log("Status: OFFLINE - Tentando Reconectar")
                 self.active = False
                 break
 
-    # ── Sprint 3 T04: Registrar como worker temporário ────────────────────────
+    # ── Sprint 3 T04: Registrar como Worker temporário no novo Master ─────────
     def _register_temporary(self) -> None:
-        msg = {
+        if self._send({
             "type":       "register_temporary_worker",
             "request_id": str(uuid.uuid4()),
             "payload": {
                 "worker_id":               WORKER_UUID,
                 "original_master_address": f"{self.orig_host}:{self.orig_port}",
             },
-        }
-        if self._send(msg):
+        }):
             log(f"register_temporary_worker enviado | origem: {self.orig_host}:{self.orig_port}")
 
-    # ── Sprint 2: Ciclo de tarefa ─────────────────────────────────────────────
+    # ── Sprint 2 T01–04: Uma iteração do ciclo de tarefa ─────────────────────
     def _task_cycle(self):
         """
-        Uma iteração do ciclo de tarefa:
         ALIVE → (QUERY | NO_TASK | command) → STATUS → ACK
-
-        Retorna:
-          None                  → ciclo normal, continuar
-          ("redirect", addr)    → recebeu command_redirect
-          ("release", addr)     → recebeu command_release
+        Retorna None (ciclo normal), ("redirect", addr) ou ("release", addr).
         """
-        # Verificar comandos pendentes antes de solicitar tarefa
+        # Verificar comandos pendentes antes de pedir tarefa
         try:
-            cmd = self.command_q.get_nowait()
-            return self._handle_command(cmd)
+            return self._handle_command(self.command_q.get_nowait())
         except queue.Empty:
             pass
 
-        # Sprint 2 T01: enviar apresentação ALIVE
+        # Sprint 2 T01 — enviar ALIVE com WORKER_UUID (+ SERVER_UUID se emprestado)
         alive: dict = {"WORKER": "ALIVE", "WORKER_UUID": WORKER_UUID}
         if self.is_borrowed:
-            alive["SERVER_UUID"] = self.orig_master_id    # identifica master de origem
+            alive["SERVER_UUID"] = self.orig_master_id
         self._send(alive)
         log(f"ALIVE enviado "
             f"{'(emprestado de ' + self.orig_master_id + ')' if self.is_borrowed else '(local)'}")
 
-        # Aguardar resposta do Master (timeout 5s — Sprint 2 nota de impl.)
+        # Aguardar resposta do Master — timeout 5s (SPEC §6)
         try:
             resp = self.response_q.get(timeout=5)
         except queue.Empty:
@@ -210,36 +189,30 @@ class WorkerClient:
             self.active = False
             return None
 
-        # Verificar se é um comando não solicitado chegando pela response_q
+        # Comando não solicitado chegou pela response_q
         mtype = resp.get("type", "")
         if mtype in ("command_redirect", "command_release"):
             return self._handle_command(resp)
 
         task = resp.get("TASK", "")
 
-        # Sprint 2 T02: sem tarefa disponível
+        # Sprint 2 T02 — sem tarefa disponível
         if task == "NO_TASK":
             log("Sem tarefas disponíveis")
             return None
 
-        # Sprint 2 T03: processar QUERY
+        # Sprint 2 T03 — processar QUERY com sleep aleatório
         if task == "QUERY":
             user = resp.get("USER", "desconhecido")
             log(f"Processando QUERY para usuário: {user}")
+            time.sleep(random.uniform(1, 3))
 
-            proc_time = random.uniform(1, 3)
-            time.sleep(proc_time)
-
-            # Resultado aleatório: 90 % OK, 10 % NOK
+            # Sprint 2 T03 — reportar STATUS OK (90 %) ou NOK (10 %)
             status = "OK" if random.random() > 0.1 else "NOK"
-            self._send({
-                "STATUS":      status,
-                "TASK":        "QUERY",
-                "WORKER_UUID": WORKER_UUID,
-            })
+            self._send({"STATUS": status, "TASK": "QUERY", "WORKER_UUID": WORKER_UUID})
             log(f"STATUS {status} enviado")
 
-            # Sprint 2 T04: aguardar ACK
+            # Sprint 2 T04 — aguardar ACK (timeout 5s)
             try:
                 ack = self.response_q.get(timeout=5)
                 if ack and ack.get("STATUS") == "ACK":
@@ -253,16 +226,18 @@ class WorkerClient:
         log(f"Resposta inesperada: {resp}")
         return None
 
-    # ── Sprint 3: tratar comandos do Master ───────────────────────────────────
+    # ── Sprint 3 T04/05: Tratar command_redirect e command_release ───────────
     def _handle_command(self, cmd: dict):
         mtype = cmd.get("type", "")
         p     = cmd.get("payload", {})
 
+        # Sprint 3 T04 — redirecionar para novo Master
         if mtype == "command_redirect":
             addr = p.get("new_master_address", "")
             log(f"command_redirect recebido → novo Master: {addr}")
             return ("redirect", addr)
 
+        # Sprint 3 T05 — retornar ao Master original
         if mtype == "command_release":
             addr = p.get("original_master_address", "")
             log(f"command_release recebido → retornando para: {addr}")
@@ -270,37 +245,31 @@ class WorkerClient:
 
         return None
 
-    # ── Ciclo principal ───────────────────────────────────────────────────────
+    # ── Sprint 1 T04: Inicia threads e executa ciclo principal ───────────────
     def run(self):
-        """
-        Conecta ao Master, inicia threads auxiliares e executa o ciclo de tarefas.
-        Retorna quando ocorre redirect ou release (para que main() trate o caso).
-        """
         self._connect()
 
-        # Sprint 3: se emprestado, anunciar-se ao novo Master
+        # Sprint 3 T04 — se emprestado, anunciar-se ao novo Master
         if self.is_borrowed:
             self._register_temporary()
 
-        # Sprint 1: thread de heartbeat periódico
+        # Sprint 1 T02 — heartbeat periódico em thread daemon
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
-        # Thread leitora (roteia mensagens para as filas corretas)
+        # Sprint 1 T04 — thread leitora em thread daemon
         threading.Thread(target=self._reader_thread, daemon=True).start()
 
-        # Ciclo de tarefas (main loop)
         result = None
         while self.active:
             try:
                 result = self._task_cycle()
                 if isinstance(result, tuple):
-                    break           # redirect ou release → main() decide
-                time.sleep(5)       # aguardar antes de solicitar próxima tarefa
+                    break           # redirect ou release — main() decide
+                time.sleep(5)
             except Exception as e:
                 log(f"Erro no ciclo de tarefas: {e}")
                 break
 
-        # Desligar graciosamente
         self.active = False
         try:
             self.conn.close()
@@ -310,13 +279,15 @@ class WorkerClient:
         return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Função principal — gerencia reconexões e transições de estado
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 1 — Tarefa 04: Loop principal de reconexão
+# Sprint 3 — Tarefa 04: Transição redirect → novo Master (worker emprestado)
+# Sprint 3 — Tarefa 05: Transição release → Master original (devolução)
+# ═══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
     log(f"Worker iniciado | UUID: {WORKER_UUID}")
 
-    # Estado atual da conexão
+    # Estado inicial de conexão
     host        = MASTER_HOST
     port        = MASTER_PORT
     master_id   = "Master_A"
@@ -340,20 +311,20 @@ def main() -> None:
         if isinstance(result, tuple):
             action, addr = result
 
+            # Sprint 3 T04 — conectar ao novo Master como worker emprestado
             if action == "redirect":
-                # Sprint 3 T04: conectar ao novo Master como worker emprestado
                 log(f"Redirecionando para: {addr}")
                 if ":" in addr:
                     h, p = addr.rsplit(":", 1)
                     host, port = h, int(p)
                 else:
                     log(f"Endereço de redirecionamento inválido: '{addr}'. Usando padrão.")
-                master_id   = addr  # ID real desconhecido antes do primeiro HEARTBEAT
+                master_id   = addr          # addr como ID até o primeiro HEARTBEAT
                 is_borrowed = True
                 # orig_id, orig_host, orig_port permanecem inalterados
 
+            # Sprint 3 T05 — retornar ao Master original
             elif action == "release":
-                # Sprint 3 T05: retornar ao Master original
                 log(f"Liberado. Retornando ao Master original: {orig_host}:{orig_port}")
                 host        = orig_host
                 port        = orig_port
@@ -361,11 +332,11 @@ def main() -> None:
                 is_borrowed = False
 
         else:
-            # Desconexão inesperada — aguardar antes de tentar reconectar
+            # Sprint 1 T04 — desconexão inesperada: aguardar e reconectar
             log("Conexão encerrada. Reconectando em 5s…")
             time.sleep(5)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     main()

@@ -446,7 +446,7 @@ def saturation_monitor() -> None:
                         }
                         if safe_send(m2m_conn, m2m_lock, notif):
                             log(f"[SAT] → notify_worker_returned → {orig_master_id} worker={uid}")
-            return  # o loop continuará na próxima iteração do while True
+            continue  # o loop continuará na próxima iteração do while True
 
         # ── Verificar saturação ───────────────────────────────────────────────
         if load > SATURATION_THRESHOLD:

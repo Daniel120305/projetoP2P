@@ -348,7 +348,7 @@ def main() -> None:
                     host, port = h, int(p)
                 else:
                     log(f"Endereço de redirecionamento inválido: '{addr}'. Usando padrão.")
-                master_id   = "Master_destino"
+                master_id   = addr  # ID real desconhecido antes do primeiro HEARTBEAT
                 is_borrowed = True
                 # orig_id, orig_host, orig_port permanecem inalterados
 

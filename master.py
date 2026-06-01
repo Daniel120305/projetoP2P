@@ -13,7 +13,7 @@ MASTER_ID   = "Master_A"
 WORKER_HOST = "10.62.206.13"
 WORKER_PORT = 10000          # Workers conectam aqui (Sprint 1 e 2)
 MASTER_HOST = "10.62.206.13"
-MASTER_PORT = 10000          # Masters vizinhos conectam aqui (Sprint 3)
+MASTER_PORT = 10001          # Masters vizinhos conectam aqui (Sprint 3)
 
 # Thresholds com histerese (Sprint 3 T02)
 CAPACITY             = 10   # capacidade nominal da fila
@@ -342,7 +342,7 @@ def request_help_from(neighbor_id: str, neighbor_info: dict, workers_needed: int
                 "current_load":   task_queue.qsize(),
                 "capacity":       CAPACITY,
                 "workers_needed": workers_needed,
-                "worker_address": f"127.0.0.1:{WORKER_PORT}",
+                "worker_address": f"{WORKER_HOST}:{WORKER_PORT}",
             },
         }
         safe_send(conn, send_lock, msg)
@@ -427,12 +427,20 @@ def saturation_monitor() -> None:
                 if safe_send(w["conn"], w["send_lock"], cmd_release):
                     log(f"[SAT] → command_release → worker {uid}")
 
+                # Remover worker emprestado da farm imediatamente
+                with state_lock:
+                    workers.pop(uid, None)
+                log(f"[SAT] Worker {uid} removido da farm | Farm → {worker_count()}")
+
                 # Sprint 3 T05: notify_worker_returned ao Master de origem
-                # Derivar master_id a partir do endereço
+                # Cruzar endereço original com NEIGHBOR_MASTERS para achar o master_id correto
                 orig_master_id = None
-                for mid, (_, _) in m2m_conns.items():
-                    orig_master_id = mid
-                    break
+                for mid, info in NEIGHBOR_MASTERS.items():
+                    if orig == f"{info['host']}:{info['worker_port']}":
+                        orig_master_id = mid
+                        break
+                if orig_master_id is None and orig in m2m_conns:
+                    orig_master_id = orig
 
                 if orig_master_id:
                     with state_lock:

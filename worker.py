@@ -10,8 +10,8 @@ from datetime import datetime
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuração
 # ─────────────────────────────────────────────────────────────────────────────
-MASTER_HOST        = "127.0.0.1"
-MASTER_PORT        = 5000
+MASTER_HOST        = "10.62.206.13"
+MASTER_PORT        = 10000
 HEARTBEAT_INTERVAL = 30          # segundos entre heartbeats (Sprint 1)
 WORKER_UUID        = str(uuid.uuid4())
 

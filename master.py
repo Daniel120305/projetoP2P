@@ -10,10 +10,10 @@ from datetime import datetime
 # Configuração
 # ─────────────────────────────────────────────────────────────────────────────
 MASTER_ID   = "Master_A"
-WORKER_HOST = "0.0.0.0"
-WORKER_PORT = 5000          # Workers conectam aqui (Sprint 1 e 2)
-MASTER_HOST = "0.0.0.0"
-MASTER_PORT = 5001          # Masters vizinhos conectam aqui (Sprint 3)
+WORKER_HOST = "10.62.206.13"
+WORKER_PORT = 10000          # Workers conectam aqui (Sprint 1 e 2)
+MASTER_HOST = "10.62.206.13"
+MASTER_PORT = 10000          # Masters vizinhos conectam aqui (Sprint 3)
 
 # Thresholds com histerese (Sprint 3 T02)
 CAPACITY             = 10   # capacidade nominal da fila

@@ -746,3 +746,27 @@ Worker   ──► Master_A : {"type": "register_temporary_worker", ...}\n
 Master_A ──► Worker   : {"type": "command_release",  "request_id": "<uuid>", "payload": {...}}\n
 Master_A ──► Master_B : {"type": "notify_worker_returned", "request_id": "<uuid>", "payload": {...}}\n
 ```
+
+---
+
+## Histórico de Commits
+
+| Hash | Data | Descrição |
+|------|------|-----------|
+| `d6148ed` | 01/06/2026 21:00 | Adiciona DOCS.md com documentação código por código do framework |
+| `de287a7` | 01/06/2026 20:52 | Aplica framework do PLAN código por código em master.py e worker.py |
+| `bcc78b5` | 01/06/2026 20:38 | Correções de framework: porta M2M, worker_address, notify e cleanup |
+| `298448f` | 01/06/2026 20:12 | Reorganiza docs em Docs/Superpowers e ajusta IPs/portas |
+| `75a3990` | 31/05/2026 22:09 | Alteração final master |
+| `9b4b007` | 11/05/2026 20:13 | Resolve conflito — mantendo implementação Sprint 1, 2 e 3 |
+| `43a993d` | 11/05/2026 20:09 | Sprint 1, 2 e 3 implementados — heartbeat, ciclo de tarefas e protocolo M2M |
+| `0a8dda4` | 16/03/2026 21:42 | Vamos |
+| `2deefe2` | 16/03/2026 21:40 | Initial commit |
+
+```bash
+# Para ver o diff de qualquer commit:
+git show <hash>
+
+# Para ver o log completo:
+git log --oneline
+```

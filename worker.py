@@ -1,3 +1,4 @@
+import sys
 import socket
 import json
 import time
@@ -7,12 +8,20 @@ import threading
 import queue
 from datetime import datetime
 
+# Garante UTF-8 na saída: evita UnicodeEncodeError com acentos/símbolos quando
+# o stdout não é UTF-8 (console cp1252 ou saída redirecionada para arquivo/pipe).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 1 — Tarefa 01: Configuração da Conexão TCP
 # Sprint 1 — Tarefa 02: Intervalo do Heartbeat
 # Sprint 2 — Tarefa 01: WORKER_UUID único
 # ═══════════════════════════════════════════════════════════════════════════════
-MASTER_HOST        = "10.62.206.13"
+MASTER_HOST        = "192.168.15.178"
 MASTER_PORT        = 10000
 HEARTBEAT_INTERVAL = 30                 # Sprint 1 T02 — heartbeat a cada 30s
 WORKER_UUID        = str(uuid.uuid4())  # Sprint 2 T01 — UUID único por instância

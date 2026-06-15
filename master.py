@@ -1,22 +1,34 @@
+import sys
 import socket
 import threading
 import json
 import time
 import uuid
 import queue
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timezone
+
+# Garante UTF-8 na saída: evita UnicodeEncodeError com →, ⚠️, ✅ e acentos quando
+# o stdout não é UTF-8 (console cp1252 ou saída redirecionada para arquivo/pipe).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+import supervisor   # Sprint 4 — reporter de métricas (TLS) ao Supervisor do cluster
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 1 — Tarefa 01: Infraestrutura TCP (Workers)
 # ═══════════════════════════════════════════════════════════════════════════════
 MASTER_ID   = "Master_A"
-WORKER_HOST = "10.62.206.13"
+WORKER_HOST = "192.168.15.178"
 WORKER_PORT = 10000          # Workers conectam aqui
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 3 — Tarefa 01: Servidor TCP entre Masters (M2M)
 # ═══════════════════════════════════════════════════════════════════════════════
-MASTER_HOST = "10.62.206.13"
+MASTER_HOST = "192.168.15.178"
 MASTER_PORT = 10001          # Masters vizinhos conectam aqui
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -47,6 +59,27 @@ pending_m2m: dict = {}         # Sprint 3 T03 — correlação de respostas M2M
 
 # conexões M2M abertas: {master_id: (conn, send_lock)}
 m2m_conns: dict = {}           # Sprint 3 T05 — reutilizadas para notify_worker_returned
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 4 — Reporter de Métricas: estado e contadores instrumentados
+# ═══════════════════════════════════════════════════════════════════════════════
+START_TIME  = time.time()                  # → uptime_seconds (supervisor.build_system_metrics)
+# PDF p.23: michel_1/michel_2 DEVEM ser usados no server_uuid do payload do supervisor
+# (identidade no dashboard do professor; separado do MASTER_ID usado no protocolo interno).
+# Use "michel_2" neste master se o outro nó da dupla for "michel_1".
+SERVER_UUID = "michel_1"
+HOSTNAME    = f"{SERVER_UUID}.farm.local"
+
+metrics_lock = threading.Lock()             # protege o dict `metrics`
+metrics = {                                 # contadores de desempenho da farm
+    "tasks_completed": 0,
+    "tasks_failed":    0,
+    "tasks_running":   0,
+    "workers_failed":  0,
+}
+
+lent_out: dict = {}                         # {worker_uuid: peer_master_id} — emprestados p/ fora
+task_timestamps = deque()                   # time.time() de cada tarefa enfileirada (idade da + antiga)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 3 — Tarefa 07: Logs e Observabilidade
@@ -185,6 +218,12 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
             try:
                 task_data = task_queue.get_nowait()
                 safe_send(conn, send_lock, {"TASK": "QUERY", "USER": task_data["user"]})
+                # Sprint 4 — tarefa entrou em execução; descarta o timestamp + antigo
+                with metrics_lock:
+                    metrics["tasks_running"] += 1
+                with state_lock:
+                    if task_timestamps:
+                        task_timestamps.popleft()
                 log(f"[W] QUERY entregue → {worker_uuid} "
                     f"({'emprestado' if is_borrowed else 'local'}) "
                     f"| fila restante: {task_queue.qsize()}")
@@ -197,6 +236,13 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
             w_uuid = msg.get("WORKER_UUID", worker_uuid)
             kind   = "emprestado" if is_borrowed else "local"
             log(f"[W] Worker {w_uuid} ({kind}) concluiu QUERY | STATUS={status}")
+            # Sprint 4 — tarefa concluída: atualiza contadores (OK / NOK)
+            with metrics_lock:
+                metrics["tasks_running"] = max(0, metrics["tasks_running"] - 1)
+                if status == "OK":
+                    metrics["tasks_completed"] += 1
+                else:
+                    metrics["tasks_failed"] += 1
             safe_send(conn, send_lock, {"STATUS": "ACK", "WORKER_UUID": w_uuid})
             log(f"[W] ACK enviado → {w_uuid}")
 
@@ -206,8 +252,17 @@ def handle_worker(conn: socket.socket, addr: tuple) -> None:
 
     # Cleanup ao desconectar
     if worker_uuid:
+        # Sprint 4 — conta workers_failed só se a saída NÃO foi redirect/release normal:
+        #   • redirect p/ vizinho → worker ainda em `workers` e listado em lent_out
+        #   • release de emprestado → já removido por saturation_monitor (pop = None)
+        #   • queda inesperada     → ainda em `workers` e fora de lent_out → falha
         with state_lock:
-            workers.pop(worker_uuid, None)
+            existed  = workers.pop(worker_uuid, None) is not None
+            was_lent = worker_uuid in lent_out
+        if existed and not was_lent:
+            with metrics_lock:
+                metrics["workers_failed"] += 1
+            log(f"[W] Worker {worker_uuid} caiu inesperadamente (workers_failed++)")
         log(f"[W] Worker {worker_uuid} removido | Farm → {worker_count()}")
     log(f"[W] Conexão encerrada: {addr}")
     try:
@@ -278,6 +333,9 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
                             "request_id": str(uuid.uuid4()),
                             "payload":    {"new_master_address": master_waddr},
                         }):
+                            # Sprint 4 — registra empréstimo p/ fora (worker → master que pediu)
+                            with state_lock:
+                                lent_out[uid] = master_id
                             log(f"[M2M] → command_redirect → worker {uid} | destino: {master_waddr}")
             else:
                 reason = "no_workers_available" if not available else "high_load"
@@ -302,6 +360,9 @@ def handle_master(conn: socket.socket, addr: tuple) -> None:
         # ── Sprint 3 T05: Confirmar devolução do worker ───────────────────────
         elif mtype == "notify_worker_returned":
             worker_id = p.get("worker_id", "?")
+            # Sprint 4 — empréstimo encerrado: sai do contador de emprestados p/ fora
+            with state_lock:
+                lent_out.pop(worker_id, None)
             log(f"[M2M] Worker {worker_id} devolvido. Farm atualizada.")
 
         # ── Sprint 3 T06: Tipo desconhecido — log + ignorar ──────────────────
@@ -462,6 +523,8 @@ def simulate_load() -> None:
     while True:
         time.sleep(3)
         task_queue.put({"user": users[i % len(users)]})
+        with state_lock:                          # Sprint 4 — carimba a idade da tarefa
+            task_timestamps.append(time.time())
         log(f"[LOAD] Tarefa adicionada (usuário={users[i % len(users)]}) | fila={task_queue.qsize()}")
         i += 1
 
@@ -497,12 +560,81 @@ def start_master_server() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Sprint 4 — collect_state(): snapshot consistente p/ o performance_report
+#   Monta (server_uuid, hostname, start_time, farm_state, thresholds, neighbors)
+#   a partir do estado já existente (workers, lent_out, task_queue, m2m_conns…).
+#   Tudo lido sob os locks (state_lock / metrics_lock) para evitar leitura suja.
+# ═══════════════════════════════════════════════════════════════════════════════
+def collect_state():
+    # Snapshot do estado da farm sob state_lock (captura tudo de uma vez)
+    with state_lock:
+        received_in = [(u, w["original_master"]) for u, w in workers.items() if w["is_borrowed"]]
+        local_here  = [u for u, w in workers.items() if not w["is_borrowed"]]
+        lent        = list(lent_out.items())
+        oldest_age  = int(time.time() - task_timestamps[0]) if task_timestamps else 0
+        pending     = task_queue.qsize()
+        active_m2m  = set(m2m_conns.keys())
+    with metrics_lock:
+        m = dict(metrics)
+
+    received_count = len(received_in)
+    local_count    = len(local_here)
+    alive          = received_count + local_count
+    running        = m["tasks_running"]
+    idle           = max(0, alive - running)
+
+    # borrowed_workers: empréstimos PARA fora ("out") + recebidos de vizinhos ("in")
+    borrowed_list  = [{"direction": "out", "peer_uuid": peer} for _, peer in lent]
+    borrowed_list += [{"direction": "in",  "peer_uuid": orig} for _, orig in received_in]
+
+    farm_state = {
+        "workers": {
+            "total_registered":           alive,
+            "workers_utilization":        running,
+            "workers_alive":              alive,
+            "workers_idle":               idle,
+            "workers_borrowed":           len(lent),            # emprestados PARA fora
+            "workers_received":           received_count,       # recebidos de vizinhos
+            "workers_failed":             m["workers_failed"],
+            "workers_home":               local_count + len(lent),
+            "workers_available_capacity": idle,
+            "borrowed_workers":           borrowed_list,
+        },
+        "tasks": {
+            "tasks_pending":     pending,
+            "tasks_running":     running,
+            "tasks_completed":   m["tasks_completed"],
+            "tasks_failed":      m["tasks_failed"],
+            "oldest_task_age_s": oldest_age,
+        },
+    }
+
+    thresholds = {
+        "max_task":            CAPACITY,
+        "warn_cpu_percent":    supervisor.WARN_CPU,
+        "warn_memory_percent": supervisor.WARN_MEMORY,
+        "release_task":        RELEASE_THRESHOLD,
+    }
+
+    now_iso   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    neighbors = [
+        {"server_uuid":    nid,
+         "status":         "available" if nid in active_m2m else "unavailable",
+         "last_heartbeat": now_iso}
+        for nid in NEIGHBOR_MASTERS
+    ]
+
+    return (SERVER_UUID, HOSTNAME, START_TIME, farm_state, thresholds, neighbors)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Entry Point — Arquitetura de threads (SPEC §4)
 #
 #   main thread  →  start_worker_server()   (bloqueia — Sprint 1 T01)
 #   daemon       →  start_master_server()   (Sprint 3 T01)
 #   daemon       →  simulate_load()         (Sprint 2 T02)
 #   daemon       →  saturation_monitor()    (Sprint 3 T02)
+#   daemon       →  supervisor reporter      (Sprint 4 — métricas a cada 10s)
 # ═══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log(f"Iniciando Master {MASTER_ID}")
@@ -514,4 +646,9 @@ if __name__ == "__main__":
     threading.Thread(target=simulate_load,       daemon=True).start()
     threading.Thread(target=saturation_monitor,  daemon=True).start()
     threading.Thread(target=start_master_server, daemon=True).start()
+
+    # Sprint 4 — reporter de métricas ao Supervisor do cluster (TLS, a cada 10s)
+    supervisor.start_reporter(collect_state)
+    log(f"Reporter de métricas (Sprint 4) iniciado → {supervisor.SUP_HOST}:{supervisor.SUP_PORT} a cada {supervisor.REPORT_INTERVAL}s")
+
     start_worker_server()

@@ -2,12 +2,11 @@
 # supervisor.py — Sprint 4: Reporter de Métricas para o Supervisor do Cluster
 #
 # Cada Master envia, a cada 10s, um `performance_report` em JSON ao Supervisor do
-# professor via TLS sobre TCP (host nuted-ia.dev:443, SNI nuted-ia.dev).
-# Padrão fire-and-forget: conecta, envia, fecha — NUNCA faz recv.
+# professor. Canal oficial (endereço atual do professor): socket TCP PURO, sem SSL,
+# em 10.62.206.206:8000 — conecta, envia o JSON + '\n' e fecha (fire-and-forget,
+# NUNCA faz recv). Se a 8000 estiver fora do ar, cai para o dashboard HTTP em :5000.
 #
-# Restrições (SPRINT4 §2): sem HTTP, sem requests/urllib/http.client; apenas
-# socket + ssl da stdlib; sem caminho de URL; tudo em try/except para jamais
-# derrubar o Master se a rede falhar.
+# Tudo em try/except para jamais derrubar o Master se a rede falhar.
 #
 # Este módulo NÃO importa master.py (evita import circular): recebe o estado da
 # farm por callback (get_state) ligado em master.collect_state.
@@ -18,6 +17,7 @@ import time
 import uuid
 import socket
 import threading
+import urllib.request
 from datetime import datetime, timezone
 
 import psutil
@@ -30,7 +30,10 @@ import psutil
 # (A versão anterior era TLS em nuted-ia.dev:443; mantida em comentário p/ histórico.)
 # ─────────────────────────────────────────────────────────────────────────────
 SUP_HOST = "10.62.206.206"   # endereço do supervisor (rede da sala)
-SUP_PORT = 8000              # PDF p.17 — socket TCP na porta 8000, sem SSL
+SUP_PORT = 8000              # PDF p.17 / professor — socket TCP na porta 8000, sem SSL
+# Fallback: se o coletor socket:8000 estiver fora do ar, tenta o dashboard HTTP:5000.
+# Deixe FALLBACK_HTTP_URL = None para enviar EXCLUSIVAMENTE pelo socket 8000.
+FALLBACK_HTTP_URL = "http://10.62.206.206:5000/"
 REPORT_INTERVAL = 10                   # segundos entre relatórios
 PAYLOAD_VERSION = "sprint4-monitor"    # §6 — confirmar com o professor (1 linha p/ trocar)
 WARN_CPU    = 85
@@ -118,16 +121,35 @@ def build_payload(server_uuid, hostname, start_time, farm_state, thresholds, nei
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Sprint 4 — Envio por socket TCP puro (sem SSL) na porta 8000
+# Sprint 4 — Envio por socket TCP puro (sem SSL) na porta 8000 (canal oficial)
 # Fire-and-forget: conecta, envia o JSON + '\n' e fecha. NUNCA faz recv (PDF p.17).
+# Se o socket:8000 estiver recusando, cai para o HTTP POST:5000 (FALLBACK_HTTP_URL).
+# Retorna o canal usado ("socket:8000" ou "http:5000") para o log.
 # ═══════════════════════════════════════════════════════════════════════════════
-def send_report(payload: dict) -> None:
-    with socket.create_connection((SUP_HOST, SUP_PORT), timeout=5) as s:
-        s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-    # sem recv: apenas SEND e close
+def send_report(payload: dict) -> str:
+    body = (json.dumps(payload) + "\n").encode("utf-8")
+    try:
+        with socket.create_connection((SUP_HOST, SUP_PORT), timeout=5) as s:
+            s.sendall(body)           # apenas SEND e close — sem recv
+        return f"socket:{SUP_PORT}"
+    except OSError as e_sock:
+        if not FALLBACK_HTTP_URL:
+            raise
+        # Fallback: dashboard HTTP na 5000 (Flask espera um POST, não socket cru)
+        req = urllib.request.Request(
+            FALLBACK_HTTP_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+        return "http:5000(fallback)"
 
 
 def _mirror_local(payload: dict) -> None:
+    """Sprint 4 (extra) — copia o report (TCP puro) p/ o dashboard.py local.
+    Best-effort e silencioso: se o dashboard não estiver no ar, ignora."""
     if not LOCAL_DASHBOARD:
         return
     try:
@@ -147,8 +169,8 @@ def start_reporter(get_state) -> None:
             payload = None
             try:
                 payload = build_payload(*get_state())
-                send_report(payload)
-                _log(f"Reporter → {SUP_HOST}:{SUP_PORT} ok "
+                channel = send_report(payload)
+                _log(f"Reporter → {SUP_HOST} via {channel} ok "
                      f"(msg_id={payload['message_id'][:8]})")
             except Exception as e:
                 # Rede pode falhar a qualquer momento: só loga, jamais propaga.

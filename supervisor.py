@@ -13,7 +13,6 @@
 # farm por callback (get_state) ligado em master.collect_state.
 # ═══════════════════════════════════════════════════════════════════════════════
 import os
-import ssl
 import json
 import time
 import uuid
@@ -24,11 +23,14 @@ from datetime import datetime, timezone
 import psutil
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sprint 4 — Config do Supervisor (parâmetros fixos pela especificação)
+# Sprint 4 — Config do Supervisor
+#
+# Endereço atualizado pelo professor (15/06): supervisor LOCAL via HTTP.
+#   http://10.62.206.206:5000/   → POST com o JSON do performance_report.
+# (A versão anterior era TLS em nuted-ia.dev:443; mantida em comentário p/ histórico.)
 # ─────────────────────────────────────────────────────────────────────────────
-SUP_HOST = "nuted-ia.dev"
-SUP_PORT = 443
-SUP_SNI  = "nuted-ia.dev"
+SUP_HOST = "10.62.206.206"   # endereço do supervisor (rede da sala)
+SUP_PORT = 8000              # PDF p.17 — socket TCP na porta 8000, sem SSL
 REPORT_INTERVAL = 10                   # segundos entre relatórios
 PAYLOAD_VERSION = "sprint4-monitor"    # §6 — confirmar com o professor (1 linha p/ trocar)
 WARN_CPU    = 85
@@ -116,19 +118,16 @@ def build_payload(server_uuid, hostname, start_time, farm_state, thresholds, nei
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Sprint 4 — Envio TLS (fire-and-forget: send + close, SEM recv)
+# Sprint 4 — Envio por socket TCP puro (sem SSL) na porta 8000
+# Fire-and-forget: conecta, envia o JSON + '\n' e fecha. NUNCA faz recv (PDF p.17).
 # ═══════════════════════════════════════════════════════════════════════════════
 def send_report(payload: dict) -> None:
-    ctx = ssl.create_default_context()
-    raw = socket.create_connection((SUP_HOST, SUP_PORT), timeout=5)
-    with ctx.wrap_socket(raw, server_hostname=SUP_SNI) as s:
+    with socket.create_connection((SUP_HOST, SUP_PORT), timeout=5) as s:
         s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-    # fire-and-forget: nenhum recv; o 'with' fecha o socket TLS
+    # sem recv: apenas SEND e close
 
 
 def _mirror_local(payload: dict) -> None:
-    """Sprint 4 (extra) — copia o report (TCP puro) p/ o dashboard.py local.
-    Best-effort e silencioso: se o dashboard não estiver no ar, ignora."""
     if not LOCAL_DASHBOARD:
         return
     try:

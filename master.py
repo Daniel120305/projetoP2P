@@ -22,14 +22,14 @@ import supervisor   # Sprint 4 — reporter de métricas (TLS) ao Supervisor do 
 # Sprint 1 — Tarefa 01: Infraestrutura TCP (Workers)
 # ═══════════════════════════════════════════════════════════════════════════════
 MASTER_ID   = "Master_A"
-WORKER_HOST = "192.168.15.178"
+WORKER_HOST = "10.62.206.213"
 WORKER_PORT = 10000          # Workers conectam aqui
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 3 — Tarefa 01: Servidor TCP entre Masters (M2M)
 # ═══════════════════════════════════════════════════════════════════════════════
-MASTER_HOST = "192.168.15.178"
-MASTER_PORT = 10001          # Masters vizinhos conectam aqui
+MASTER_HOST = "0.0.0.0"
+MASTER_PORT = 10000         # Masters vizinhos conectam aqui
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sprint 3 — Tarefa 02: Thresholds com Histerese
@@ -67,7 +67,7 @@ START_TIME  = time.time()                  # → uptime_seconds (supervisor.buil
 # PDF p.23: michel_1/michel_2 DEVEM ser usados no server_uuid do payload do supervisor
 # (identidade no dashboard do professor; separado do MASTER_ID usado no protocolo interno).
 # Use "michel_2" neste master se o outro nó da dupla for "michel_1".
-SERVER_UUID = "michel_1"
+SERVER_UUID = "MASTER_15"     # antes: "michel_1"  — algo só seu
 HOSTNAME    = f"{SERVER_UUID}.farm.local"
 
 metrics_lock = threading.Lock()             # protege o dict `metrics`
@@ -522,7 +522,6 @@ def simulate_load() -> None:
     i = 0
     while True:
         time.sleep(3)
-        task_queue.put({"user": users[i % len(users)]})
         with state_lock:                          # Sprint 4 — carimba a idade da tarefa
             task_timestamps.append(time.time())
         log(f"[LOAD] Tarefa adicionada (usuário={users[i % len(users)]}) | fila={task_queue.qsize()}")

@@ -21,7 +21,7 @@ for _stream in (sys.stdout, sys.stderr):
 # Sprint 1 — Tarefa 02: Intervalo do Heartbeat
 # Sprint 2 — Tarefa 01: WORKER_UUID único
 # ═══════════════════════════════════════════════════════════════════════════════
-MASTER_HOST        = "192.168.15.178"
+MASTER_HOST        = "10.62.206.213"
 MASTER_PORT        = 10000
 HEARTBEAT_INTERVAL = 30                 # Sprint 1 T02 — heartbeat a cada 30s
 WORKER_UUID        = str(uuid.uuid4())  # Sprint 2 T01 — UUID único por instância
